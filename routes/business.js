@@ -1,72 +1,20 @@
 // ============================================================
-//  ARIA Business OS — Business & Customer Routes
+//  ARIA Platform — Business Routes (Multi-tenant)
 // ============================================================
 
-const express  = require('express');
-const router   = express.Router();
-const { Business, Customer } = require('../models');
+const express = require('express');
+const router  = express.Router();
+const { Customer } = require('../models');
+const { authMiddleware } = require('./auth');
 
-// ── Business Settings ─────────────────────────────────────────
+router.use(authMiddleware);
 
-// GET business settings
-router.get('/settings', async (req, res) => {
-  try {
-    let business = await Business.findOne();
-    if (!business) {
-      business = await Business.create({
-        name: process.env.BUSINESS_NAME || 'My Business',
-        services: [
-          { name: 'Consultation', duration: 30, price: 500 },
-          { name: 'Full Service',  duration: 60, price: 1000 },
-        ],
-        workingHours: {
-          monday:    { open: '09:00', close: '18:00', closed: false },
-          tuesday:   { open: '09:00', close: '18:00', closed: false },
-          wednesday: { open: '09:00', close: '18:00', closed: false },
-          thursday:  { open: '09:00', close: '18:00', closed: false },
-          friday:    { open: '09:00', close: '18:00', closed: false },
-          saturday:  { open: '10:00', close: '16:00', closed: false },
-          sunday:    { open: '10:00', close: '14:00', closed: true  },
-        },
-      });
-    }
-    res.json({ business });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// PATCH update business settings
-router.patch('/settings', async (req, res) => {
-  try {
-    const business = await Business.findOneAndUpdate(
-      {},
-      req.body,
-      { new: true, upsert: true }
-    );
-    res.json({ business });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// ── Customers ─────────────────────────────────────────────────
-
-// GET all customers
+// GET all customers for this business
 router.get('/customers', async (req, res) => {
   try {
-    const customers = await Customer.find().sort({ createdAt: -1 }).limit(100);
+    const customers = await Customer.find({ businessId: req.business.id })
+      .sort({ createdAt: -1 }).limit(100);
     res.json({ customers });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// GET single customer
-router.get('/customers/:id', async (req, res) => {
-  try {
-    const customer = await Customer.findById(req.params.id);
-    res.json({ customer });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
