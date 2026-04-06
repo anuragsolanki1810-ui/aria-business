@@ -1,11 +1,11 @@
 // ============================================================
-//  ARIA Business OS — Main Server
-//  AI Voice Agent for Business
+//  ARIA Platform — Main Server v2.0
+//  Multi-tenant AI Voice Agent Platform
 // ============================================================
 
-const express    = require('express');
-const cors       = require('cors');
-const mongoose   = require('mongoose');
+const express  = require('express');
+const cors     = require('cors');
+const mongoose = require('mongoose');
 require('dotenv').config();
 
 const app  = express();
@@ -14,16 +14,18 @@ const port = process.env.PORT || 4000;
 // ── Middleware ───────────────────────────────────────────────
 app.use(cors());
 app.use(express.json());
-app.use(express.urlencoded({ extended: true })); // needed for Twilio webhooks
+app.use(express.urlencoded({ extended: true }));
 
-// ── Database connection ──────────────────────────────────────
-mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/aria-business')
+// ── Database ─────────────────────────────────────────────────
+mongoose.connect(process.env.MONGODB_URI)
   .then(() => console.log('MongoDB connected'))
   .catch(err => console.error('MongoDB error:', err.message));
 
 // ── Routes ───────────────────────────────────────────────────
-app.use('/chat',         require('./routes/chat'));
+const { router: authRouter } = require('./routes/auth');
+app.use('/auth',         authRouter);
 app.use('/appointments', require('./routes/appointments'));
+app.use('/chat',         require('./routes/chat'));
 app.use('/voice',        require('./routes/voice'));
 app.use('/business',     require('./routes/business'));
 
@@ -31,23 +33,22 @@ app.use('/business',     require('./routes/business'));
 app.get('/health', (req, res) => {
   res.json({
     status:   'ok',
-    message:  'ARIA Business OS is running',
-    version:  '1.0.0',
+    message:  'ARIA Platform is running',
+    version:  '2.0.0',
     database: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected',
   });
 });
 
-// ── Start reminder scheduler ─────────────────────────────────
+// ── Reminder scheduler ───────────────────────────────────────
 const { startReminderScheduler } = require('./services/reminderScheduler');
 startReminderScheduler();
 
-// ── Start server ─────────────────────────────────────────────
+// ── Start ─────────────────────────────────────────────────────
 app.listen(port, () => {
   console.log(`
 ╔══════════════════════════════════════╗
-║     ARIA Business OS — Running       ║
+║     ARIA Platform v2.0 — Running     ║
 ║     http://localhost:${port}            ║
-║     Health: /health                  ║
 ╚══════════════════════════════════════╝
   `);
 });
