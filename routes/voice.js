@@ -1,5 +1,6 @@
 // ============================================================
-//  ARIA Business OS — Voice Call Routes (Twilio Webhooks)
+//  ARIA Platform — Voice Routes (Multi-tenant)
+//  Each business has their own Twilio number
 // ============================================================
 
 const express  = require('express');
@@ -7,92 +8,96 @@ const router   = express.Router();
 const twilio   = require('twilio');
 const { chat } = require('../services/aiService');
 const { sendConfirmation } = require('../services/notificationService');
-const { CallLog } = require('../models');
+const { CallLog, Business } = require('../models');
 
 const VoiceResponse = twilio.twiml.VoiceResponse;
+const callSessions  = {};
 
-// Store call sessions in memory (use Redis in production)
-const callSessions = {};
-
-// POST /voice/incoming — Twilio calls this when someone calls your number
+// POST /voice/incoming — Twilio calls this when someone calls
 router.post('/incoming', async (req, res) => {
-  const twiml    = new VoiceResponse();
-  const callSid  = req.body.CallSid;
+  const twiml       = new VoiceResponse();
+  const callSid     = req.body.CallSid;
   const callerPhone = req.body.From || '';
+  const calledNumber = req.body.To || '';
+
+  // Find which business owns this Twilio number
+  const business = await Business.findOne({ twilioNumber: calledNumber });
+
+  if (!business) {
+    twiml.say('Sorry, this number is not configured. Please contact support.');
+    twiml.hangup();
+    res.type('text/xml');
+    return res.send(twiml.toString());
+  }
 
   // Initialize session
   callSessions[callSid] = {
     messages: [],
     callerPhone,
+    businessId: business._id.toString(),
     startTime: Date.now(),
   };
 
-  // Get business greeting
-  const greeting = process.env.GREETING || `Thank you for calling ${process.env.BUSINESS_NAME || 'us'}. I'm ARIA, your AI assistant. How can I help you today?`;
+  const greeting = business.greeting || `Thank you for calling ${business.name}. I am ${business.agentName || 'ARIA'}, your AI assistant. How can I help you today?`;
 
-  // Speak greeting and listen
   const gather = twiml.gather({
-    input:        'speech',
-    action:       `/voice/respond?callSid=${callSid}`,
-    method:       'POST',
-    language:     'en-IN',
+    input:         'speech',
+    action:        `/voice/respond?callSid=${callSid}`,
+    method:        'POST',
+    language:      business.language || 'en-IN',
     speechTimeout: 'auto',
-    timeout:       5,
+    timeout:        5,
   });
   gather.say({ voice: 'Polly.Aditi', language: 'en-IN' }, greeting);
-
-  // If no input
   twiml.redirect('/voice/incoming');
 
   res.type('text/xml');
   res.send(twiml.toString());
 });
 
-// POST /voice/respond — Handles each turn of the conversation
+// POST /voice/respond — Each turn of conversation
 router.post('/respond', async (req, res) => {
   const twiml   = new VoiceResponse();
   const callSid = req.query.callSid;
   const speech  = req.body.SpeechResult || '';
 
-  const session = callSessions[callSid] || { messages: [], callerPhone: req.body.From || '' };
+  const session = callSessions[callSid];
+  if (!session) {
+    twiml.say('Sorry, something went wrong. Please call again.');
+    twiml.hangup();
+    res.type('text/xml');
+    return res.send(twiml.toString());
+  }
 
-  // Add user message
   session.messages.push({ role: 'user', content: speech });
 
   try {
-    const { reply, action, actionResult } = await chat(session.messages, session.callerPhone);
-
-    // Add AI response to session
+    const { reply, action, actionResult } = await chat(session.messages, session.callerPhone, session.businessId);
     session.messages.push({ role: 'assistant', content: reply });
     callSessions[callSid] = session;
 
-    // Send WhatsApp confirmation if appointment was booked
     if (action?.action === 'book' && actionResult?.success) {
       sendConfirmation(actionResult.appointment).catch(console.error);
     }
 
-    // Speak the reply and listen for next input
+    const business = await Business.findById(session.businessId);
+    const lang = business?.language || 'en-IN';
+
     const gather = twiml.gather({
       input:         'speech',
       action:        `/voice/respond?callSid=${callSid}`,
       method:        'POST',
-      language:      'en-IN',
+      language:      lang,
       speechTimeout: 'auto',
       timeout:        5,
     });
     gather.say({ voice: 'Polly.Aditi', language: 'en-IN' }, reply);
-
-    // If caller stops talking, ask again
-    twiml.say({ voice: 'Polly.Aditi', language: 'en-IN' }, 'Are you still there? Is there anything else I can help you with?');
-    twiml.gather({
-      input:  'speech',
-      action: `/voice/respond?callSid=${callSid}`,
-      method: 'POST',
-    });
+    twiml.say({ voice: 'Polly.Aditi' }, 'Is there anything else I can help you with?');
+    twiml.gather({ input: 'speech', action: `/voice/respond?callSid=${callSid}`, method: 'POST' });
 
   } catch (err) {
     console.error('AI error during call:', err.message);
-    twiml.say({ voice: 'Polly.Aditi' }, 'I apologize, I am having trouble right now. Please call back in a moment.');
+    twiml.say({ voice: 'Polly.Aditi' }, 'I apologize, I am having trouble. Please call back in a moment.');
     twiml.hangup();
   }
 
@@ -100,22 +105,21 @@ router.post('/respond', async (req, res) => {
   res.send(twiml.toString());
 });
 
-// POST /voice/status — Twilio calls this when call ends
+// POST /voice/status — Call ended
 router.post('/status', async (req, res) => {
   const callSid  = req.body.CallSid;
   const duration = parseInt(req.body.CallDuration) || 0;
   const session  = callSessions[callSid];
 
   if (session) {
-    // Save call log to database
     await CallLog.create({
+      businessId:  session.businessId,
       callSid,
-      callerPhone:  session.callerPhone,
+      callerPhone: session.callerPhone,
       duration,
-      transcript:   session.messages,
-      outcome:      session.messages.length > 2 ? 'query_answered' : 'other',
+      transcript:  session.messages,
+      outcome:     session.messages.length > 2 ? 'query_answered' : 'other',
     }).catch(console.error);
-
     delete callSessions[callSid];
   }
 
