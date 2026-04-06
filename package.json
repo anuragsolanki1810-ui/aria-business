@@ -1,7 +1,7 @@
 {
-  "name": "aria-business-backend",
-  "version": "1.0.0",
-  "description": "ARIA Business OS — AI Voice Agent Backend",
+  "name": "aria-platform-backend",
+  "version": "2.0.0",
+  "description": "ARIA Platform — Multi-tenant AI Voice Agent",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
@@ -15,7 +15,8 @@
     "twilio": "^5.0.4",
     "node-cron": "^3.0.3",
     "date-fns": "^3.6.0",
-    "express-validator": "^7.0.1"
+    "bcryptjs": "^2.4.3",
+    "jsonwebtoken": "^9.0.2"
   },
   "devDependencies": {
     "nodemon": "^3.1.0"
