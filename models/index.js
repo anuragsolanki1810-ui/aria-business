@@ -1,32 +1,31 @@
 const mongoose = require('mongoose');
 
-// ── Business (Tenant) Model ───────────────────────────────────
+// ── Business Model ────────────────────────────────────────────
 const businessSchema = new mongoose.Schema({
-  email:        { type: String, required: true, unique: true, trim: true, lowercase: true },
-  password:     { type: String, required: true },
-  name:         { type: String, required: true, trim: true },
-  phone:        { type: String, trim: true },
-  address:      { type: String },
-  timezone:     { type: String, default: 'Asia/Kolkata' },
+  email:    { type: String, required: true, unique: true, trim: true, lowercase: true },
+  password: { type: String, required: true },
+  name:     { type: String, required: true, trim: true },
+  phone:    { type: String, trim: true },
+  address:  { type: String },
+  timezone: { type: String, default: 'Asia/Kolkata' },
 
-  // Phone number (assigned by admin or auto)
+  // Phone + Vapi
   twilioNumber:     { type: String, default: '' },
   twilioNumberSid:  { type: String, default: '' },
+  vapiAssistantId:  { type: String, default: '' }, // Vapi assistant ID
   numberAssigned:   { type: Boolean, default: false },
-  numberRequestedAt:{ type: Date },
 
   // Subscription
-  plan:           { type: String, enum: ['trial', 'starter', 'growth', 'pro'], default: 'trial' },
-  trialEndsAt:    { type: Date, default: () => new Date(Date.now() + 14*24*60*60*1000) },
-  isActive:       { type: Boolean, default: true },
-  razorpaySubId:  { type: String },
-  lastPaymentAt:  { type: Date },
+  plan:          { type: String, enum: ['trial','starter','growth','pro'], default: 'trial' },
+  trialEndsAt:   { type: Date, default: () => new Date(Date.now() + 14*24*60*60*1000) },
+  isActive:      { type: Boolean, default: true },
+  lastPaymentAt: { type: Date },
 
   // AI Agent settings
-  agentName:          { type: String, default: 'ARIA' },
-  agentPersonality:   { type: String, default: 'friendly' },
-  greeting:           { type: String, default: '' },
-  language:           { type: String, default: 'en-IN' },
+  agentName:        { type: String, default: 'ARIA' },
+  agentPersonality: { type: String, default: 'friendly' },
+  greeting:         { type: String, default: '' },
+  language:         { type: String, default: 'en-IN' },
 
   // Services
   services: [{
@@ -45,19 +44,18 @@ const businessSchema = new mongoose.Schema({
     saturday:  { open: { type: String, default: '10:00' }, close: { type: String, default: '16:00' }, closed: { type: Boolean, default: false } },
     sunday:    { open: { type: String, default: '10:00' }, close: { type: String, default: '14:00' }, closed: { type: Boolean, default: true  } },
   },
-
   createdAt: { type: Date, default: Date.now },
 });
 
 // ── Phone Number Pool ─────────────────────────────────────────
-// You add numbers here, system assigns them automatically
 const phoneNumberSchema = new mongoose.Schema({
-  number:      { type: String, required: true, unique: true },
-  sid:         { type: String },
-  isAssigned:  { type: Boolean, default: false },
-  businessId:  { type: mongoose.Schema.Types.ObjectId, ref: 'Business', default: null },
-  assignedAt:  { type: Date },
-  addedAt:     { type: Date, default: Date.now },
+  number:     { type: String, required: true, unique: true },
+  sid:        { type: String, default: '' },
+  provider:   { type: String, enum: ['twilio','vapi'], default: 'twilio' },
+  isAssigned: { type: Boolean, default: false },
+  businessId: { type: mongoose.Schema.Types.ObjectId, ref: 'Business', default: null },
+  assignedAt: { type: Date },
+  addedAt:    { type: Date, default: Date.now },
 });
 
 // ── Customer Model ────────────────────────────────────────────
@@ -86,7 +84,6 @@ const appointmentSchema = new mongoose.Schema({
   status:        { type: String, enum: ['pending','confirmed','cancelled','completed'], default: 'confirmed' },
   notes:         { type: String },
   reminderSent:  { type: Boolean, default: false },
-  confirmationSent: { type: Boolean, default: false },
   createdBy:     { type: String, default: 'ai-agent' },
   createdAt:     { type: Date, default: Date.now },
 });
@@ -111,4 +108,3 @@ module.exports = {
   Appointment: mongoose.model('Appointment', appointmentSchema),
   CallLog:     mongoose.model('CallLog',     callLogSchema),
 };
-
