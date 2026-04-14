@@ -1,72 +1,78 @@
 // ============================================================
-//  ARIA Platform — Phone Number Service
-//  Pool management + auto Twilio webhook connection
+//  ARIA Business Platform — Phone Service (Vapi)
+//  Manages phone numbers via Vapi.ai instead of Twilio
 // ============================================================
 
-const twilio = require('twilio');
 const { PhoneNumber, Business } = require('../models');
+const { createVapiAssistant, updateVapiAssistant, deleteVapiAssistant } = require('./vapiService');
 
-const BACKEND_URL = process.env.BACKEND_URL || 'https://aria-business.onrender.com';
+const VAPI_API_KEY = process.env.VAPI_API_KEY;
+const BACKEND_URL  = process.env.BACKEND_URL || 'https://aria-business-platform.up.railway.app';
 
-function getClient() {
-  if (!process.env.TWILIO_ACCOUNT_SID || !process.env.TWILIO_AUTH_TOKEN) return null;
-  return twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
-}
-
-// ── Connect webhook on Twilio for a number ────────────────────
-async function connectWebhook(numberSid) {
-  const client = getClient();
-  if (!client || !numberSid) return false;
+// ── Get all Vapi phone numbers ────────────────────────────────
+async function getVapiNumbers() {
+  if (!VAPI_API_KEY) return [];
   try {
-    await client.incomingPhoneNumbers(numberSid).update({
-      voiceUrl:             `${BACKEND_URL}/voice/incoming`,
-      voiceMethod:          'POST',
-      statusCallback:       `${BACKEND_URL}/voice/status`,
-      statusCallbackMethod: 'POST',
+    const r = await fetch('https://api.vapi.ai/phone-number', {
+      headers: { 'Authorization': `Bearer ${VAPI_API_KEY}` }
     });
-    console.log(`✅ Webhook connected for SID: ${numberSid}`);
-    return true;
-  } catch (err) {
-    console.error('Twilio webhook error:', err.message);
-    return false;
-  }
+    const data = await r.json();
+    return Array.isArray(data) ? data : [];
+  } catch { return []; }
 }
 
-// ── Sync ALL numbers from Twilio into pool ────────────────────
-async function syncFromTwilio() {
-  const client = getClient();
-  if (!client) return { success: false, message: 'Twilio not configured. Add TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN to Render environment.' };
-
+// ── Sync Vapi numbers to pool ─────────────────────────────────
+async function syncFromVapi() {
   try {
-    const numbers = await client.incomingPhoneNumbers.list();
+    const numbers = await getVapiNumbers();
     let added = 0;
-
     for (const num of numbers) {
-      const existing = await PhoneNumber.findOne({ number: num.phoneNumber });
+      const existing = await PhoneNumber.findOne({ number: num.number });
       if (!existing) {
         await PhoneNumber.create({
-          number:     num.phoneNumber,
-          sid:        num.sid,
+          number:     num.number,
+          sid:        num.id, // Vapi uses id not sid
           isAssigned: false,
+          provider:   'vapi',
         });
         added++;
-        console.log(`Added ${num.phoneNumber} to pool`);
-      } else if (!existing.sid) {
-        // Update SID if missing
-        await PhoneNumber.findOneAndUpdate({ number: num.phoneNumber }, { sid: num.sid });
       }
     }
-
     return { success: true, added, total: numbers.length };
   } catch (err) {
     return { success: false, message: err.message };
   }
 }
 
-// ── Auto-assign next available number ────────────────────────
+// ── Also sync Twilio numbers ──────────────────────────────────
+async function syncFromTwilio() {
+  if (!process.env.TWILIO_ACCOUNT_SID || !process.env.TWILIO_AUTH_TOKEN) {
+    return syncFromVapi();
+  }
+  try {
+    const twilio  = require('twilio');
+    const client  = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
+    const numbers = await client.incomingPhoneNumbers.list();
+    let added = 0;
+    for (const num of numbers) {
+      const existing = await PhoneNumber.findOne({ number: num.phoneNumber });
+      if (!existing) {
+        await PhoneNumber.create({ number: num.phoneNumber, sid: num.sid, isAssigned: false, provider: 'twilio' });
+        added++;
+      }
+    }
+    // Also sync Vapi numbers
+    const vapiResult = await syncFromVapi();
+    return { success: true, added: added + (vapiResult.added || 0), total: numbers.length };
+  } catch (err) {
+    return syncFromVapi();
+  }
+}
+
+// ── Assign number + create Vapi assistant ────────────────────
 async function assignNumberToBusiness(businessId) {
   try {
-    // Find next available number in pool
+    // Find next available number
     const phoneNumber = await PhoneNumber.findOneAndUpdate(
       { isAssigned: false },
       { isAssigned: true, businessId, assignedAt: new Date() },
@@ -74,38 +80,44 @@ async function assignNumberToBusiness(businessId) {
     );
 
     if (!phoneNumber) {
-      console.log('⚠️  No numbers in pool! Admin needs to sync from Twilio or add numbers manually.');
-      return { success: false, message: 'No phone numbers available. Contact support.' };
+      return { success: false, message: 'No phone numbers available. Admin needs to add more numbers.' };
     }
 
-    // Connect Twilio webhook for this number
-    if (phoneNumber.sid) {
-      await connectWebhook(phoneNumber.sid);
-    } else {
-      // Try to find the SID from Twilio
-      const client = getClient();
-      if (client) {
-        try {
-          const numbers = await client.incomingPhoneNumbers.list({ phoneNumber: phoneNumber.number });
-          if (numbers.length > 0) {
-            await connectWebhook(numbers[0].sid);
-            await PhoneNumber.findByIdAndUpdate(phoneNumber._id, { sid: numbers[0].sid });
-          }
-        } catch (e) {
-          console.error('Could not find SID:', e.message);
-        }
+    // Get business details
+    const business = await Business.findById(businessId);
+    if (!business) return { success: false, message: 'Business not found' };
+
+    // Create Vapi assistant for this business
+    let vapiAssistantId = null;
+    try {
+      const assistant = await createVapiAssistant(business);
+      vapiAssistantId = assistant.id;
+      console.log(`✅ Vapi assistant created: ${vapiAssistantId}`);
+
+      // Connect the phone number to this assistant in Vapi
+      if (phoneNumber.sid && phoneNumber.provider === 'vapi') {
+        await fetch(`https://api.vapi.ai/phone-number/${phoneNumber.sid}`, {
+          method:  'PATCH',
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${VAPI_API_KEY}` },
+          body: JSON.stringify({ assistantId: vapiAssistantId }),
+        });
+      } else if (phoneNumber.sid && phoneNumber.provider === 'twilio') {
+        // Connect Twilio number to Vapi
+        await connectTwilioNumberToVapi(phoneNumber.number, phoneNumber.sid, vapiAssistantId);
       }
+    } catch (vapiErr) {
+      console.error('Vapi assistant creation error:', vapiErr.message);
     }
 
     // Update business
     await Business.findByIdAndUpdate(businessId, {
-      twilioNumber:    phoneNumber.number,
-      twilioNumberSid: phoneNumber.sid || '',
-      numberAssigned:  true,
+      twilioNumber:     phoneNumber.number,
+      numberAssigned:   true,
+      vapiAssistantId,
     });
 
-    console.log(`✅ Number ${phoneNumber.number} assigned to business ${businessId}`);
-    return { success: true, number: phoneNumber.number };
+    console.log(`✅ Number ${phoneNumber.number} assigned to ${business.name}`);
+    return { success: true, number: phoneNumber.number, assistantId: vapiAssistantId };
 
   } catch (err) {
     console.error('assignNumberToBusiness error:', err.message);
@@ -113,37 +125,65 @@ async function assignNumberToBusiness(businessId) {
   }
 }
 
-// ── Manually assign a specific number ────────────────────────
+// ── Connect Twilio number to Vapi ─────────────────────────────
+async function connectTwilioNumberToVapi(number, sid, assistantId) {
+  if (!VAPI_API_KEY) return false;
+  try {
+    // Import the number into Vapi
+    const r = await fetch('https://api.vapi.ai/phone-number', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${VAPI_API_KEY}` },
+      body: JSON.stringify({
+        provider:        'twilio',
+        number,
+        twilioAccountSid:  process.env.TWILIO_ACCOUNT_SID,
+        twilioAuthToken:   process.env.TWILIO_AUTH_TOKEN,
+        assistantId,
+        name: `ARIA - ${number}`,
+      }),
+    });
+    const data = await r.json();
+    console.log('Twilio number connected to Vapi:', data.id || data.message);
+    return data.id || false;
+  } catch (err) {
+    console.error('connectTwilioNumberToVapi error:', err.message);
+    return false;
+  }
+}
+
+// ── Manually assign specific number ──────────────────────────
 async function assignSpecificNumber(businessId, number) {
   try {
-    const client = getClient();
-    let sid = '';
+    const business = await Business.findById(businessId);
+    if (!business) return { success: false, message: 'Business not found' };
 
-    // Get SID from Twilio
-    if (client) {
-      const numbers = await client.incomingPhoneNumbers.list({ phoneNumber: number });
-      if (numbers.length > 0) {
-        sid = numbers[0].sid;
-        await connectWebhook(sid);
-      }
+    // Create Vapi assistant
+    let vapiAssistantId = null;
+    try {
+      const assistant = await createVapiAssistant(business);
+      vapiAssistantId = assistant.id;
+    } catch (e) {
+      console.error('Vapi error:', e.message);
     }
 
-    // Add to pool if not already there
+    // Add to pool and assign
     let phoneDoc = await PhoneNumber.findOne({ number });
     if (!phoneDoc) {
-      phoneDoc = await PhoneNumber.create({ number, sid, isAssigned: true, businessId, assignedAt: new Date() });
+      phoneDoc = await PhoneNumber.create({ number, isAssigned: true, businessId, assignedAt: new Date() });
     } else {
-      await PhoneNumber.findByIdAndUpdate(phoneDoc._id, { isAssigned: true, businessId, assignedAt: new Date(), sid: sid || phoneDoc.sid });
+      await PhoneNumber.findByIdAndUpdate(phoneDoc._id, { isAssigned: true, businessId, assignedAt: new Date() });
     }
 
-    // Update business
+    // Try to connect to Vapi
+    if (vapiAssistantId) {
+      await connectTwilioNumberToVapi(number, phoneDoc.sid, vapiAssistantId);
+    }
+
     await Business.findByIdAndUpdate(businessId, {
-      twilioNumber:    number,
-      twilioNumberSid: sid,
-      numberAssigned:  true,
+      twilioNumber: number, numberAssigned: true, vapiAssistantId,
     });
 
-    return { success: true, number };
+    return { success: true, number, assistantId: vapiAssistantId };
   } catch (err) {
     return { success: false, message: err.message };
   }
@@ -153,17 +193,37 @@ async function assignSpecificNumber(businessId, number) {
 async function releaseNumber(businessId) {
   try {
     const business = await Business.findById(businessId);
-    if (!business?.twilioNumber) return { success: false, message: 'No number to release' };
+    if (!business) return { success: false, message: 'Business not found' };
 
-    await PhoneNumber.findOneAndUpdate(
-      { number: business.twilioNumber },
-      { isAssigned: false, businessId: null, assignedAt: null }
-    );
+    // Delete Vapi assistant
+    if (business.vapiAssistantId) {
+      await deleteVapiAssistant(business.vapiAssistantId).catch(console.error);
+    }
+
+    // Release number
+    if (business.twilioNumber) {
+      await PhoneNumber.findOneAndUpdate(
+        { number: business.twilioNumber },
+        { isAssigned: false, businessId: null, assignedAt: null }
+      );
+    }
 
     await Business.findByIdAndUpdate(businessId, {
-      twilioNumber: '', twilioNumberSid: '', numberAssigned: false,
+      twilioNumber: '', numberAssigned: false, vapiAssistantId: null,
     });
 
+    return { success: true };
+  } catch (err) {
+    return { success: false, message: err.message };
+  }
+}
+
+// ── Update Vapi assistant when business settings change ───────
+async function updateBusinessAssistant(businessId) {
+  try {
+    const business = await Business.findById(businessId);
+    if (!business?.vapiAssistantId) return { success: false };
+    await updateVapiAssistant(business.vapiAssistantId, business);
     return { success: true };
   } catch (err) {
     return { success: false, message: err.message };
@@ -179,9 +239,10 @@ async function getPoolStats() {
 
 module.exports = {
   syncFromTwilio,
+  syncFromVapi,
   assignNumberToBusiness,
   assignSpecificNumber,
   releaseNumber,
+  updateBusinessAssistant,
   getPoolStats,
-  connectWebhook,
 };
